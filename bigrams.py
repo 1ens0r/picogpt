@@ -3,9 +3,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-torch.manual_seed(1337)
-batch_size = 4
+# hyperparameters
+batch_size = 32
 block_size = 8
+max_iters = 20000
+eval_interval = 300
+eval_iters = 200
+learning_rate = 1e-2
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+torch.manual_seed(1337)
 
 # read the data
 with open('input.txt', 'r', encoding='utf-8') as f:
@@ -39,14 +46,29 @@ data = torch.tensor(encode(text), dtype=torch.long)
 # split into train and val
 limit = int(0.9 * len(data))
 Xtr = data[:limit] # (torch.Size([1003854])
-Xval = data[:limit] # torch.Size([1003854]))
+Xval = data[limit:] # torch.Size([111540])
 
 def get_batch(split):
     data = Xtr if split=='train' else Xval
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x, y = x.to(device), y.to(device)
     return x, y
+
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    m.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            logits, loss = m(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    m.train()
+    return out
 
 # the fun part
 class BigramLanguageModel(nn.Module):
@@ -56,7 +78,7 @@ class BigramLanguageModel(nn.Module):
 
     def forward(self, idx, targets=None):   
         logits = self.token_embedding_table(idx) #(B,T,C)
-        if targets == None:
+        if targets is None:
             loss = None
         else:
             B,T,C = logits.shape
@@ -65,6 +87,7 @@ class BigramLanguageModel(nn.Module):
             loss = F.cross_entropy(logits, targets)
         return logits, loss
 
+    @torch.no_grad()
     def generate(self, idx, max_new_tokens):
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
@@ -77,12 +100,17 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
         
-m = BigramLanguageModel(vocab_size)
+m = BigramLanguageModel(vocab_size).to(device)
 
 # optimiser
-optimizer = torch.optim.AdamW(m.parameters(), lr=1e-3)
-batch_size = 32
-for steps in range(100000): # increase number of steps for good results...
+optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
+
+for it in range(max_iters):
+
+    # every once in a while evaluate the loss on train and val sets
+    if it % eval_interval == 0:
+        losses = estimate_loss()
+        print(f"step {it}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
     # sample a batch of data
     xb, yb = get_batch('train')
@@ -93,5 +121,9 @@ for steps in range(100000): # increase number of steps for good results...
     loss.backward()
     optimizer.step()
 
-print(loss.item())
-print(decode(m.generate(idx = torch.zeros((1, 1), dtype=torch.long), max_new_tokens=500)[0].tolist()))
+# generate from the model
+m.eval()
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
+
+print("===========================OUTPUT===========================")
+print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
